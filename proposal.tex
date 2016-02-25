@@ -1,0 +1,169 @@
+\documentclass[10pt]{report}
+
+\usepackage{hyperref}
+
+\title{Proposal:\\Domain language to model the rendering pipeline of OpenGL Applications}
+\author{Arne D\"oring}
+
+\begin{document}
+
+\maketitle
+
+In my previous experience, writing 3D applications was always a very time consuming task. The raw OpenGL API was desinged only to enable the usage of the graphics hardware for rendering applications, but not to make this task simpler. Therefore a lot of 3D engines have emerged, that implemented the rendering pipeline for a lot of use cases, but on the other hand, there hasn't been a lot of releases that try to simplify the engineering process of rendering pipelines. With this master thesis I want to target those people, who want to experiment with different rendering techniques on fast iteration times, without using too much time on refactoring code, or deal with OpenGL errors, while keeping the code reusability as high as possible. I would like to write a Domain Specific Language (DSL) that allows the modelling of the rendering pipeline on a higher abstraction level, without the sacrifice of noticeable amount of performance.
+
+There are generally two common methods to design a DSL \cite{van2000domain}.
+\begin{itemize}
+\item \textbf{Interpretation or compilation} This is the classical approach to implementing a new language.
+
+\item \textbf{Embedded languages / domain-specific libraries} In this approach, existing mechanisms such as definitions for functions or operators with user-defined syntax are used to build a library of domain-specific operations.
+\end{itemize}
+In this master thesis I would like to use the second approach.
+
+OpenGL itself is a very low level C API, that also keeps the amount of used C features to a minimum. This helps a lot to write bindings for OpenGL to almost any programming language in the world, but it doesn't make the development of applications easy. There are several OpenGl wrappers, that try to use the features of the language target language like a type system more, in order to provide a more secure usage of OpenGL. e.g.
+
+\begin{itemize}
+\item \href{http://oglplus.org/}{OGLplus} (C++)
+\item \href{https://github.com/tomaka/glium}{glium} (Rust)
+\item \href{http://www.opentk.com/}{OpenTK} (C\#)
+\end{itemize}
+
+All of these APIs are good, and a clear advantage over the raw OpenGL binding. One could say they are an embedded DSL, because they only use features of the underlying programming language, and allow to express certain things nicer than raw OpenGL. On the other hand there are full DSLs, that exist in their own environment, with their own parser. GLSL would be an example for this. Full DSLs have the most flexibility, because they are only limited by what a parser can parse, while on the other hand embedded DSLs are limited by the language, and are based on the target language much inferior than pure DSLs. But embedded DSLs integrate much better in existing code, because no glue code needs to be written. I would like to write an embedded DSL, because among others my DSL should generate the glue code that is necessary to connect the program with a part that is written in GLSL. Because an embedded DSL is highly limited by the features of the target language, I need to choose the target language wisely, to not end up in something that is not more powerful than one of the already mentioned wrappers. So a language that has lisp like macros that allow to modify the abstract syntax tree (AST) of the application at compile time would be powerful enough. Because of the low level nature of rendering applications the language needs to have full support of pointers C-style structs, and value types in general.
+
+\textbf{The right programming language:} I did a lot of investigations on how to do something like this embedded DSL in \textbf{C++}, but it turned out that C++ is not powerful enough as a language, to to allow the development of this DSL. C++ does not provide reflection at all, and the macros in c++ don't know anything about the AST of C++. In my Bachelor thesis I used \textbf{Scala}, and it is really a very nice programming language for a lot of things. It even added macros to the language since then, so that a lot of things are possible that weren't back then. But the language doesn't have value other than the built in primitive types (int, float, etc), and no array of structs. This drawback could be dealt with the right macros in combination of java.nio.buffer (byte arrays), but the force to have garbage collection everywhere is not good for rendering code. In my Bachelor project I had a case where one temporary object type was created permanently on the heap and created a big impact on the garbage collector and therefore the the reliable performance. \textbf{Rust} seems to be a very promising programming language, it has a lot of features from Scala that I used to like a lot, and additionally to that it allows to program on a low level without garbage collection, because of smart move semantics. The language even provides macros so I thought, this would be the language to go. But in my investigation it turned out, that macros in rust are not powerful at all. They only allow very limited transformations. It is not possible to use the full power of the rust programming language to describe these transformations. 
+For example \texttt{std::format\_{}args} which is used for the rust version of \texttt{printf} is not implemented with macros, but it is implemented in the compiler. 
+Maybe at some point Rust will be the better suitable language for this project, but not for now. Then I took a look at \href{http://nim-lang.org/}{\texttt{Nim}} and found out, that it has all the features that I need to write my DSL. It might be very unknown at this point, but the community is growing, and the language is at a usable state. Even though nim has garbage collection, it is possible to write code in Nim that doesn't allocate a single byte of the garbage collected heap at all, which makes it very suitable to use in rendering code. The macros allow to take an arbitrary AST of any nim statement and apply code transformations to it at compile time. The transformation is written in nim itself, there is no language within the language like C macros. It is also possible to get complete type information of all nodes of argument AST. This is optional, because otherwise a lot of flexibility in the DSL would be lost.
+
+\vspace{7 mm}
+
+\begin{tabular}{ r | c c c c }
+  & AST macros & struct/pointer & reflection & gc free code \\
+\hline
+c++ & fail & ok & fail & ok \\
+scala & ok & fail & ok & fail \\
+rust & fail & ok & ok & ok \\
+nim & ok & ok & ok & ok\\
+\end{tabular}
+\vspace{7 mm}
+
+\textbf{The concept of the DSL:}
+
+In rendering a shader program is often called from a texttt{renderSomething} function. This function then calculates some values that are then passed as uniforms to the shader:
+
+\begin{verbatim}
+
+const char* somethingShaderSrc = R"(
+[...]
+uniform mat4 mvp;
+[...]
+void main() {
+  gl_Position = mvp * a_pos;
+  [...]
+}
+)";
+
+Program somethingShaderProgram;
+int mvp_location = -1;
+
+void setupShaders() {
+  somethingShaderProgram = compile(somethingShaderSrc, [...]);
+  mvp_location = somethingShaderProgram.getLocation("mvp");
+}
+
+void renderSomething(Something st) {
+    mat4 mvp = projectionMatrix * viewMatrix * st.modelMatrix();
+    somethingShaderProgram.use();
+    glUniformMatrix4fv(mvp_location, 1, false, mvp.data());
+    somethingShaderProgram.render();
+}
+
+
+\end{verbatim}
+
+This code has a lot of problems. There is a lot of boilerplate code that has to be written and maintained in case of changes happening. For example if the uniform variable mvp get's renamed, also \texttt{mvp\_location} needs a rename, and getLocation needs a new argument. If doesn't even rise an error at runtime if the string "mvp" is not updated at all. All that happens will be that getLocation will return $-1$ as a result, and passing $-1$ to \texttt{glUniformXY} is perfectly valid, OpenGl simply omits the argument. Filtering out $-1$ at getLocation isn't a good idea either, because the $-1$ could also come from an optimization, where the shader uniform has been optimized out. 
+
+In my DSL I would use macros, to generate the boilerplate code. Code that get's generated from macros, doesn't need to be maintained, because that is something the compiler does for me. Because I will write my DSL in Nim, I show how the same use case would look like in with my DSL in nim syntax (semantic whitespace like Python).
+
+\begin{verbatim}
+proc renderSomething(st : Something) : void =
+    let mvp = projectionMatrix * viewMatrix * st.modelMatrix()
+    
+    shadingDsl:
+        uniforms:
+            mvp
+        attributes:
+           [...]
+        vertexMain:
+            """
+            gl_Position = mvp * a_pos;
+            [...]
+            """
+\end{verbatim}
+
+the first obvious difference is, that there are no variables outside of \texttt{ren\-der\-Some\-thing}, this is because the macro \texttt{shadingDsl} generates everything that is needed for the rendering part. The section under \texttt{uniforms:} describes a capture list, that works similar to the capture list in c++11 lambda expressions. The macro knows the name \textit{"mvp"}, and the type \texttt{mat4} and can therefore generate the shader code \texttt{uniform mat4 mvp;}, the getLocation call and variable, the call to glUniformMatrix4fv, and last but not least the macro creates the full glsl code with the boilerplate and creates the \textit{compile} call to compile the shader itself.
+
+This was just one very simple example, where a rendering DSL could improve the productivity to model the rendering pipeline. It can be extended to work for attributes and framebuffers, too:
+
+\begin{verbatim}
+let vertices = vertices = arrayBuffer([
+    vec4f(-1,-1,1,1), vec4f(3,-1,1,1), vec4f(-1,3,1,1)
+])
+
+declareFramebuffer(Fb1FramebufferType):
+  depth = createEmptyDepthTexture2D(windowsize)
+  color = createEmptyTexture2D(windowsize, GL_RGBA8)
+  normal = createEmptyTexture2D(windowsize, GL_RGBA16F)
+
+proc renderSomething(st : Something) : void =
+    let mvp = projectionMatrix * viewMatrix * st.modelMatrix()
+    
+    bindFramebuffer(fb1, Fb1FramebufferType):
+        shadingDsl:
+            uniforms:
+                mvp
+            attributes:
+               a_pos = vertices
+            vertexMain:
+                """
+                gl_Position = mvp * a_pos;
+                [...]
+                """
+            fragmentMain:
+                """
+                color = vec4(1,1,1,1);
+                normal = vec4(0,0,1,0);
+                """
+        
+        # here could be a second draw call to the same
+        # framebuffer
+    
+    # from here on the framebuffer is not bound anymore, but it's
+    # color attachments are still available as as textures from
+    # fb1 writing to normal in a fragmentMain from here on would
+    # lead to an glsl compile error.
+    
+    fb1.color.generateMipmaps()
+    fb1.normal.generateMipmaps()
+    
+    [...]
+    
+\end{verbatim}
+
+This code creates a framebuffer type with the declareFramebuffer macro. This has to be a macro call, because the shadingDsl generates the glsl code at compile time, and needs to know which names framebuffer attachments, to generate the out variables for the fragment shader.
+
+\begin{verbatim}
+// fragment shader
+// generated from bound framebuffer
+out vec4 color;    
+out vec4 normal;
+
+void main() {
+    color = vec4(1,1,1,1);
+    normal = vec4(0,0,1,0);
+}
+\end{verbatim}
+
+There is an example of deferred shading in this DSL, available on \href{https://github.com/krux02/opengl-sandbox/blob/master/examples/deferred_shading.nim}{\textbf{github}}.
+
+\bibliography{proposal}{}
+\bibliographystyle{plain}
+\end{document}
